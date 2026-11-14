@@ -2155,6 +2155,221 @@ TEST_F(TestLevelSetMultiObject, PerLabelAdvection)
     EXPECT_NEAR(b2[1] - b1[1], 0.0, 0.5 * dx);
 }
 
+TEST_F(TestLevelSetMultiObject, KinematicSurfaceStaysExact)
+{
+    // A kinematic sphere (label 2, radius 6, started from its exact signed
+    // distance at a sub-voxel center) translating along +x through label 0
+    // and orbiting a second, translating along a diagonal: the stamped surface
+    // must stay sub-voxel accurate on every side, including the trailing side
+    // the object moves away from (where stale distances must not survive).
+    const double r = 6.0, dx = 1.0;
+    struct Case { Vec3d c0; std::function<math::Mat4d(double)> motion; const char* name; };
+    auto translate = [](const Vec3d& v) {
+        return [v](double t) {
+            math::Mat4d m = math::Mat4d::identity();
+            m.setTranslation(v * t);
+            return m;
+        };
+    };
+    const Case cases[] = {
+        {Vec3d(0.3, 0.4, 0.1), translate(Vec3d(1.0, 0.0, 0.0)), "x"},
+        {Vec3d(0.3, 0.4, 0.1), translate(Vec3d(0.6, 0.5, -0.4)), "diagonal"},
+    };
+    for (const tools::KinematicSource source :
+        {tools::KinematicSource::RestPose, tools::KinematicSource::Transport})
+    for (const Case& cs : cases) {
+        const char* src = source == tools::KinematicSource::RestPose ? "rest" : "transport";
+        SCOPED_TRACE(std::string(cs.name) + "/" + src);
+        std::map<int32_t, FloatGrid::ConstPtr> in;
+        in[2] = tools::createLevelSetSphere<FloatGrid>(float(r), Vec3f(cs.c0), float(dx));
+        auto m = MLS::fromSignedGrids(in);
+        Forces forces;
+        tools::LevelSetMultiObject<MLS, Forces> lsmo(*m, forces);
+        lsmo.setKinematicLabel(2, tools::createLevelSetSphere<FloatGrid>(float(r), Vec3f(cs.c0),
+            float(dx)), cs.motion, source);
+        double worst = 0.0;
+        for (double t = 0.0; t < 12.0 - 1e-9; t += 2.0) {
+            lsmo.advect(t, t + 2.0);
+            const Vec3d c = cs.motion(t + 2.0).transform(cs.c0);
+            const auto meshes = tools::multiObjectToMesh(*m);
+            ASSERT_TRUE(meshes.count(2));
+            ASSERT_FALSE(meshes.at(2).points.empty());
+            for (const Vec3s& p : meshes.at(2).points) {
+                worst = std::max(worst, std::abs((Vec3d(p) - c).length() - r));
+            }
+        }
+        std::cout << "KinematicSurfaceStaysExact(" << cs.name << "/" << src << "): max |radius error| "
+                  << worst / dx << " dx" << std::endl;
+        EXPECT_LE(worst, 0.1 * dx);
+    }
+}
+
+TEST_F(TestLevelSetMultiObject, LocalTopologyCheck)
+{
+    // tools::lsmo_internal::sameLocalTopology on a 12^3 box whose outer two layers
+    // never change: a solid block [2, 9]^3 with a 2^3 cavity at [5, 6]^3.
+    using tools::lsmo_internal::DenseMask;
+    const CoordBBox box(Coord(0), Coord(11));
+    auto make = [&](const std::function<bool(const Coord&)>& in) {
+        DenseMask m(box);
+        for (int k = 0; k < m.nz; ++k)
+        for (int j = 0; j < m.ny; ++j)
+        for (int i = 0; i < m.nx; ++i) m.v[m.idx(i, j, k)] = in(Coord(i, j, k));
+        return m;
+    };
+    auto inBox = [](const Coord& p, const Coord& lo, const Coord& hi) {
+        return p[0] >= lo[0] && p[1] >= lo[1] && p[2] >= lo[2]
+            && p[0] <= hi[0] && p[1] <= hi[1] && p[2] <= hi[2];
+    };
+    auto blockWithCavity = [&](const Coord& c) {
+        return make([&, c](const Coord& p) {
+            return inBox(p, Coord(2), Coord(9)) && !inBox(p, c, c + Coord(1));
+        });
+    };
+    const DenseMask before = blockWithCavity(Coord(5));
+    for (const tools::MultiObjectConnectivity conn : {tools::MultiObjectConnectivity::FG26_BG6,
+        tools::MultiObjectConnectivity::FG6_BG26, tools::MultiObjectConnectivity::FG18_BG6,
+        tools::MultiObjectConnectivity::FG6_BG18}) {
+        SCOPED_TRACE(lsmo_test::connectivityName(conn));
+        // the cavity moved by a voxel: same topology
+        EXPECT_TRUE(tools::lsmo_internal::sameLocalTopology(before, blockWithCavity(Coord(6, 5, 5)), conn));
+        // the cavity opened to the outside: one cavity fewer
+        EXPECT_FALSE(tools::lsmo_internal::sameLocalTopology(before, make([&](const Coord& p) {
+            return inBox(p, Coord(2), Coord(9)) && !inBox(p, Coord(5), Coord(9, 6, 6));
+        }), conn));
+        // a tunnel through the block (no cavity): Euler characteristic
+        const DenseMask solid = make([&](const Coord& p) { return inBox(p, Coord(2), Coord(9)); });
+        EXPECT_FALSE(tools::lsmo_internal::sameLocalTopology(solid, make([&](const Coord& p) {
+            return inBox(p, Coord(2), Coord(9)) && !inBox(p, Coord(2, 5, 5), Coord(9, 6, 6));
+        }), conn));
+    }
+    // two slabs reaching the box boundary, joined inside the box: they may
+    // be one component through the outside, so joining them changes the
+    // boundary partition (a tunnel or a merge over the whole grid)
+    auto slabs = [&](bool bridge) {
+        return make([&, bridge](const Coord& p) {
+            if (p[2] <= 3 || p[2] >= 8) return true;
+            return bridge && inBox(p, Coord(5, 5, 4), Coord(6, 6, 7));
+        });
+    };
+    EXPECT_FALSE(tools::lsmo_internal::sameLocalTopology(slabs(false), slabs(true),
+        tools::MultiObjectConnectivity::FG26_BG6));
+    EXPECT_TRUE(tools::lsmo_internal::sameLocalTopology(slabs(true), slabs(true),
+        tools::MultiObjectConnectivity::FG26_BG6));
+}
+
+namespace {
+
+// A protected block (label 1, [0, 39]^3) and a kinematic sphere (label 2,
+// radius 5) translating along +x from @a c0 at unit speed until @a tEnd,
+// with @a source. Returns the evolver's diagnostics through @a substeps and
+// @a fallbacks (counted after the first stamp) and checks, every chunk,
+// that the block keeps @a topo; @a zeroInside receives the most label-0
+// voxels found strictly inside the block's box (a trail).
+template<typename CheckT>
+void
+runSphereInProtectedBlock(const Vec3d& c0, double tEnd, tools::KinematicSource source,
+    const lsmo_test::DigitalTopology& topo, size_t& substeps, size_t& fallbacks,
+    Index64& zeroInside, double& radiusError, const CheckT& perChunk)
+{
+    const double r = 5.0;
+    Int32Grid::Ptr labels = Int32Grid::create(0);
+    {
+        auto acc = labels->getAccessor();
+        acc.tree().fill(CoordBBox(Coord(0), Coord(39)), 1, true);
+        for (auto p = CoordBBox(Coord::round(c0) - Coord(6), Coord::round(c0) + Coord(6)).begin();
+             p; ++p) {
+            if (((*p).asVec3d() - c0).length() < r) acc.setValue(*p, 2);
+        }
+    }
+    auto m = MLS::fromLabelGrid(*labels);
+    Forces forces;
+    tools::LevelSetMultiObject<MLS, Forces> lsmo(*m, forces);
+    auto motion = [c0](double t) {
+        math::Mat4d mm = math::Mat4d::identity();
+        mm.setTranslation(Vec3d(t, 0.0, 0.0));
+        return mm;
+    };
+    lsmo.setTopologyPreservingLabels({1});
+    lsmo.setKinematicLabel(2, tools::createLevelSetSphere<FloatGrid>(float(r), Vec3f(c0), 1.0f),
+        motion, source);
+    lsmo.step(0.25f); // the first stamp (rest pose, no move to check)
+    const size_t sub0 = lsmo.kinematicSubsteps(), fb0 = lsmo.kinematicVoxelFallbacks();
+    const CoordBBox domain(Coord(-12), Coord(60, 52, 52));
+    zeroInside = 0;
+    radiusError = 0.0;
+    for (double t = lsmo.time(); t < tEnd - 1e-9; ) {
+        const double t1 = std::min(tEnd, t + 2.0);
+        lsmo.advect(t, t1);
+        t = t1;
+        EXPECT_EQ(lsmo_test::digitalTopology(*m->labels(), 1, domain, lsmo.connectivity()), topo)
+            << "t " << t;
+        Index64 zeros = 0;
+        tree::ValueAccessor<const LabelTree> acc(m->labels()->tree());
+        for (auto p = CoordBBox(Coord(1), Coord(38)).begin(); p; ++p) zeros += acc.getValue(*p) == 0;
+        zeroInside = std::max(zeroInside, zeros);
+        perChunk(*m, t);
+        std::string msg;
+        EXPECT_TRUE(m->validate(&msg)) << msg;
+    }
+    const Vec3d c = motion(tEnd).transform(c0);
+    const auto meshes = tools::multiObjectToMesh(*m);
+    for (const Vec3s& p : meshes.at(2).points) {
+        radiusError = std::max(radiusError, std::abs((Vec3d(p) - c).length() - r));
+    }
+    substeps = lsmo.kinematicSubsteps() - sub0;
+    fallbacks = lsmo.kinematicVoxelFallbacks() - fb0;
+}
+
+} // anonymous namespace
+
+TEST_F(TestLevelSetMultiObject, KinematicMovesInsideProtectedLabel)
+{
+    // A sphere inside the protected block (a cavity of it) moves 8 voxels:
+    // every move keeps the block's topology as a whole (the cavity moves),
+    // so no move is split or applied per voxel; the block closes behind the
+    // sphere (no label-0 trail) and the sphere stays exact.
+    for (const tools::KinematicSource source :
+        {tools::KinematicSource::RestPose, tools::KinematicSource::Transport}) {
+        SCOPED_TRACE(source == tools::KinematicSource::RestPose ? "rest" : "transport");
+        size_t substeps = 0, fallbacks = 0;
+        Index64 zeroInside = 0;
+        double radiusError = 0.0;
+        runSphereInProtectedBlock(Vec3d(14.3, 19.6, 20.2), 8.0, source,
+            lsmo_test::DigitalTopology{1, 1, 2}, substeps, fallbacks, zeroInside, radiusError,
+            [](const MLS&, double) {});
+        std::cout << "KinematicMovesInsideProtectedLabel: substeps " << substeps << ", fallbacks "
+                  << fallbacks << ", label-0 voxels inside " << zeroInside
+                  << ", radius error " << radiusError << " dx" << std::endl;
+        EXPECT_EQ(substeps, size_t(0));
+        EXPECT_EQ(fallbacks, size_t(0));
+        EXPECT_EQ(zeroInside, Index64(0));
+        EXPECT_LE(radiusError, 0.1);
+    }
+}
+
+TEST_F(TestLevelSetMultiObject, KinematicPassesThroughProtectedLabel)
+{
+    // A sphere starting outside the protected block passes through it along
+    // +x. Entering is a dent: the voxels it vacates near the entry take the
+    // label across its old boundary, label 0 there, so it drags a channel
+    // and is never enclosed (no cavity). Leaving through the far face would
+    // turn that channel into a tunnel: those moves are refused as a whole,
+    // split, and at the smallest split applied per voxel (trapping and
+    // wrapping). The block stays a ball throughout.
+    size_t substeps = 0, fallbacks = 0;
+    Index64 zeroInside = 0;
+    double radiusError = 0.0;
+    runSphereInProtectedBlock(Vec3d(-7.2, 19.6, 20.2), 60.0, tools::KinematicSource::RestPose,
+        lsmo_test::DigitalTopology{1, 0, 1}, substeps, fallbacks, zeroInside, radiusError,
+        [](const MLS&, double) {});
+    std::cout << "KinematicPassesThroughProtectedLabel: substeps " << substeps << ", fallbacks "
+              << fallbacks << ", label-0 voxels inside (max) " << zeroInside << std::endl;
+    EXPECT_GT(zeroInside, Index64(0)); // the channel
+    EXPECT_GT(substeps, size_t(0));
+    EXPECT_GT(fallbacks, size_t(0));
+}
+
 TEST_F(TestLevelSetMultiObject, KinematicLabelBasics)
 {
     // A kinematic sphere (label 2, radius 4) translating along +x at unit
@@ -4305,11 +4520,16 @@ runTopologyCubeGates(double motion)
         // control: without protection the spheres change the cube's topology
         const CubeRunResult ctrl = runCubeThroughSpheres(false, rule, 1, -1.0, motion);
         EXPECT_TRUE(ctrl.changed);
-        // no protected label: no floor, and phi values below it occur
-        EXPECT_GT(ctrl.belowFloor, Index64(0));
+        // no protected label: no floor, and phi values below it occur. The
+        // control stops at its first topology change: the cube closes around
+        // the spheres it passes (voxels a sphere leaves take the cube's
+        // label), so that comes at t ~ 10, which at full-voxel motion is too
+        // few steps for such values to appear (printed only there).
+        const bool fullVoxel = motion > tools::lsmo_internal::kHalfVoxelMotion;
+        if (!fullVoxel) EXPECT_GT(ctrl.belowFloor, Index64(0));
         std::cout << "TopologyCube(control/" << lsmo_test::connectivityName(rule)
                   << "): first change at t " << ctrl.firstChange << " " << ctrl.firstChangeTopo
-                  << std::endl;
+                  << ", active phi below the floor " << ctrl.belowFloor << std::endl;
     }
 }
 

@@ -14,7 +14,7 @@ OpenVDB itself is not modified: it is a git submodule ([`external/openvdb`](exte
 
 ([mp4](docs/media/mogac_topology_cube_t54.mp4))
 
-**Eight objects in a vortex.** Eight differently shaped objects (sphere, cube, platonic solids, capsule, torus) start on a ring and spiral in towards the axis in a divergence-free vortex field, stretching along it. As the gaps between them close below a voxel they come into contact, and the label partition keeps them from overlapping or leaving vacuum between them (`VortexEightObjects`).
+**Eight objects in a twisting vortex.** Eight differently shaped objects (sphere, cube, platonic solids, capsule, torus) start on a ring and spiral in towards the axis in a divergence-free vortex field, stretching along it. A twist orthogonal to the stretching, whose rate grows with the distance from the mid-plane and turns opposite ways above and below it, bends the stretched objects into S-shapes. As the gaps between them close below a voxel they come into contact, and the label partition keeps them from overlapping or leaving vacuum between them (`VortexTwist`; the `VortexEightObjects` test runs the same scene without the twist).
 
 ![MOGAC eight objects in a vortex](docs/media/mogac_vortex.gif)
 
@@ -154,7 +154,7 @@ Each step of `LevelSetMultiObject`:
 | Forces | `MultiObjectForces`: curvature, advection, pressure, per-label advection (`setAdvection(label, field, weight)`), fixed and inactive labels, speed extension (`setSpeedExtension`) |
 | Operator splitting | `setSplitting`: Strang splitting of hyperbolic and parabolic terms, used only when curvature would limit the step; interruptible sub-updates |
 | Interface motion | `setMaxInterfaceMotion(0.5 \| 1.0)`: half-voxel (default) or full-voxel motion per step |
-| Kinematic labels | `setKinematicLabel(label, sdf, motion(t))`, `clearKinematicLabel`: rigid obstacles with prescribed motion |
+| Kinematic labels | `setKinematicLabel(label, sdf, motion(t), source)`, `clearKinematicLabel`: rigid obstacles with prescribed motion, moved by projecting signed distances from the rest pose (`KinematicSource::RestPose`, default) or the object's own transported shape (`KinematicSource::Transport`); protected labels are checked for each move as a whole, with splitting and a per-voxel fallback (`kinematicSubsteps`, `kinematicVoxelFallbacks`) |
 | Topology | `setTopologyPreservingLabels`, `setConnectivity` (FG26/BG6, FG6/BG26, FG18/BG6, FG6/BG18), `setMinimumPhi`, `phiFloor`, `validateTopologyFloor` |
 | Volume | `setVolumeConstraint`, `preserveInitialVolume`, `setVolumeRelaxation`, `clearVolumeConstraints`, `labelVolume` |
 | Redistancing | incremental by default, `setFullRedistance(true)` for exact full solves, `markExternallyModified()` after external edits |
@@ -183,7 +183,7 @@ Each step of `LevelSetMultiObject`:
 
 ## Tests
 
-`mogac_test` holds the full test set: 96 tests in `TestLevelSetMultiObject` and `TestLevelSetMultiObjectMesh`. Besides every public entry point (holder invariants, factories and their error cases, extraction, dilate/erode, redistancing, 16-bit labels and grid I/O, stencil and forces, evolver options, mesher case tables and geometry), it runs the long scenarios: contact without cascading, growth, advection, curvature flow, fixed walls, kinematic obstacles, partition invariance under random speeds, the eight-object vortex, and the topology-preserving cube through orbiting spheres under several connectivity rules against an unprotected control, many of them at both half- and full-voxel motion.
+`mogac_test` holds the full test set: 100 tests in `TestLevelSetMultiObject` and `TestLevelSetMultiObjectMesh`. Besides every public entry point (holder invariants, factories and their error cases, extraction, dilate/erode, redistancing, 16-bit labels and grid I/O, stencil and forces, evolver options, mesher case tables and geometry), it runs the long scenarios: contact without cascading, growth, advection, curvature flow, fixed walls, kinematic obstacles (surface accuracy for both sources, moving inside and passing through protected labels), partition invariance under random speeds, the eight-object vortex, and the topology-preserving cube through orbiting spheres under several connectivity rules against an unprotected control, many of them at both half- and full-voxel motion.
 
 ```bash
 ctest --test-dir build -j16                                  # all tests, ~4.5 min on 16 cores
@@ -217,6 +217,25 @@ python3 scripts/render_mogac_tests.py --out /path/to/renders --filter '*Vortex*'
 ```
 
 Run it with `--help` for the remaining options (`--skip-build`, `--skip-tests`, `--skip-render`, `--keep-frames`, `--shards`, `--jobs`, `--fps`).
+
+### Demo videos
+
+The scenes behind [`docs/media`](docs/media) are opt-in tests in [`tests/TestLevelSetMultiObjectVideo.cc`](tests/TestLevelSetMultiObjectVideo.cc), disabled so they don't slow down `ctest`:
+
+```bash
+# topology cube: run both simulations, then compose them side by side
+OPENVDB_MOGAC_FRAME_DIR=/tmp/cube/frames ./build/tests/mogac_test \
+    --gtest_also_run_disabled_tests --gtest_filter='*DISABLED_TopologyCubeVideo'
+scripts/render_topology_cube.py /tmp/cube/frames docs/media/mogac_topology_cube_t54.mp4 \
+    --gif docs/media/mogac_topology_cube_t54.gif --subtitle "128^3" --frames 230
+
+# twisting vortex: run, then render /tmp/vortex/frames/VortexTwist-1
+OPENVDB_MOGAC_FRAME_DIR=/tmp/vortex/frames ./build/tests/mogac_test \
+    --gtest_also_run_disabled_tests --gtest_filter='*DISABLED_VortexTwist'
+scripts/render_mogac_tests.py --skip-build --skip-tests --out /tmp/vortex
+```
+
+`MOGAC_VIDEO_RESOLUTION` sets the cube scene's voxels per cube side (default 128; the unit test uses 40) and `MOGAC_VIDEO_T_END` its end time (default 54). The scene starts from signed distance fields, so the spheres are sub-voxel accurate at any resolution. The 128³ run takes about 5 minutes on 16 cores.
 
 ## Documentation
 

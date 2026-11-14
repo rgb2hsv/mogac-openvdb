@@ -249,7 +249,14 @@ contactPairs(const MultiLevelSetT& m)
 ///   neighbors on one circle do not shear past each other);
 /// - axial outflow u_z = z*D(r) with D = -(1/r) d(r u_r)/dr, which cancels
 ///   the horizontal convergence: the flow preserves volume, so objects
-///   spiral in while stretching along z about the plane z = 0.
+///   spiral in while stretching along z about the plane z = 0;
+/// - optional twist u_theta += twist*z*r (off by default; kTwist in the
+///   VortexTwist demo): a rotation about the stretch axis, orthogonal to the
+///   stretching, whose angular velocity twist*z grows with the distance from
+///   the plane z = 0 and has opposite signs on either side, so stretched
+///   objects are twisted about z. It does not depend on theta, so the flow
+///   stays divergence-free. It makes touching objects shear past each other,
+///   so VortexEightObjects (whose volume gates assume they do not) keeps it off.
 /// An exact flow never brings disjoint objects into contact (gaps between
 /// neighbors on one circle shrink in proportion to r); contact comes from
 /// those gaps closing below a voxel as the objects are drawn inwards.
@@ -265,13 +272,14 @@ struct Vortex
     static constexpr double kInflow = 0.4;          ///< far-field radial speed towards the axis
     static constexpr double kCoreRadius = 8.0;      ///< inflow vanishes linearly inside ~this
     static constexpr double kAngularVelocity = 0.012; ///< swirl, radians per unit time
+    static constexpr double kTwist = 5e-4;          ///< demo twist, rad per unit time per unit z
     static constexpr double kCurvatureWeight = 0.003;
     static constexpr int kBoxHalfWidth = 80;        ///< velocity grid is [-80, 80]^3
     static constexpr int kNumObjects = 8;
     /// Below this r/core, convergence() uses its limit at the axis.
     static constexpr double kAxisTolerance = 1e-6;
     double inflow = kInflow, core = kCoreRadius, angularVelocity = kAngularVelocity,
-        r0 = kStartRadius, ringRadius = kRingPolygonRadius;
+        twist = 0.0, r0 = kStartRadius, ringRadius = kRingPolygonRadius;
     double scale = kShapeScale, curvature = kCurvatureWeight;
     int box = kBoxHalfWidth;
 
@@ -288,7 +296,7 @@ struct Vortex
         using openvdb::Vec3d;
         const double r = std::sqrt(p[0] * p[0] + p[1] * p[1]);
         const double ur = -inflow * std::tanh(r / core);
-        Vec3d v = Vec3d(-p[1], p[0], 0.0) * angularVelocity
+        Vec3d v = Vec3d(-p[1], p[0], 0.0) * (angularVelocity + twist * p[2])
             + Vec3d(0.0, 0.0, p[2] * convergence(r));
         if (r > 0.0) v += Vec3d(p[0], p[1], 0.0) * (ur / r);
         return openvdb::Vec3s(v);

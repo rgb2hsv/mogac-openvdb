@@ -28,7 +28,18 @@ OpenVDB:
     that samples advection and pressure at the closest interface point
     (setSpeedExtension()).
   - Kinematic labels: rigid obstacles with prescribed motion
-    (setKinematicLabel(), clearKinematicLabel()).
+    (setKinematicLabel(), clearKinematicLabel()). Each step moves an object
+    as a projection of signed distances: its signed distance at the new pose
+    comes from its rest-pose level set (KinematicSource::RestPose, the
+    default) or from its own signed distance read from the grids and carried
+    by the motion (KinematicSource::Transport, read once and re-read only
+    after a dent, so it does not drift); voxels it leaves take the label
+    across its old boundary, and the voxels straddling its surface keep its
+    exact distance on both sides. Changes to topology-preserving labels are
+    checked for the move as a whole (components, cavities and Euler
+    characteristic, compared locally); a move that fails is split, down to
+    1/16 of a step, and then applied per voxel with trapping and outward
+    wrap (kinematicSubsteps(), kinematicVoxelFallbacks()).
   - Opt-in topology preservation (setTopologyPreservingLabels(),
     setConnectivity()) with a phi floor on protected interfaces
     (setMinimumPhi(), phiFloor(), validateTopologyFloor()).

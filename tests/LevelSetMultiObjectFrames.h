@@ -71,14 +71,18 @@ labelColor(int32_t label)
     return palette[i];
 }
 
-/// Directory name of the next evolver of the running test: "<Test>-<k>".
+/// Directory name of the next evolver of the running test: "<Test>-<k>"
+/// (without a DISABLED_ prefix).
 inline std::string
 nextSimulationName()
 {
     static std::unordered_map<std::string, int> counts;
     const ::testing::TestInfo* info =
         ::testing::UnitTest::GetInstance()->current_test_info();
-    const std::string test = info ? info->name() : "NoTest";
+    std::string test = info ? info->name() : "NoTest";
+    // opt-in demo scenes are DISABLED_ tests; name their frames without it
+    const std::string disabled = "DISABLED_";
+    if (test.rfind(disabled, 0) == 0) test.erase(0, disabled.size());
     return test + "-" + std::to_string(++counts[test]);
 }
 

@@ -6,7 +6,8 @@ find_package(GTest 1.10 REQUIRED)
 add_executable(mogac_test
   main.cc
   TestLevelSetMultiObject.cc
-  TestLevelSetMultiObjectMesh.cc)
+  TestLevelSetMultiObjectMesh.cc
+  TestLevelSetMultiObjectVideo.cc)
 
 target_link_libraries(mogac_test PRIVATE MOGAC::mogac GTest::gtest)
 

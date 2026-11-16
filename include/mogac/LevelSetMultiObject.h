@@ -3495,6 +3495,26 @@ public:
     /// 1e-2*dx beyond; true makes the result exact.
     void setFullRedistance(bool on) { mFullRedistance = on; }
     bool fullRedistance() const { return mFullRedistance; }
+    /// @brief Unfreeze projected voxels whose interface has collapsed
+    /// (experimental; 0, the default, never).
+    /// @details A projected voxel p is left to the redistance instead of
+    /// being frozen when every face neighbor q of another label has
+    /// phi_p + phi_q < @a fractionOfDx*dx (a distance field has at least
+    /// dx/sqrt(3) across the interface along its dominant normal axis).
+    /// Voxels of fixed and kinematic labels and their face neighbors stay
+    /// frozen.
+    /// @throw ValueError if @a fractionOfDx is negative or not finite.
+    void setCollapseUnfreezeThreshold(double fractionOfDx)
+    {
+        if (!(fractionOfDx >= 0.0) || !std::isfinite(fractionOfDx)) {
+            OPENVDB_THROW(ValueError, "LevelSetMultiObject: invalid collapse threshold");
+        }
+        mCollapseFraction = fractionOfDx;
+    }
+    double collapseUnfreezeThreshold() const { return mCollapseFraction; }
+    /// @brief Voxels unfrozen by setCollapseUnfreezeThreshold() since
+    /// construction (diagnostic).
+    size_t collapsedUnfrozen() const { return mCollapsedUnfrozen; }
     /// @brief Declare that the pair was changed by something other than this
     /// evolver since its last step (e.g. MultiLevelSet::dilate() or a
     /// relabel between advect() calls): the next step re-solves the whole
@@ -4534,6 +4554,9 @@ private:
 
     void cleanOrphans(FloatTreeT& phi, LabelTreeT& labels, BoolTreeT& freeze);
     void bandMaintenance(const BoolTreeT& freeze);
+    /// The voxels of @a freeze whose interface collapsed
+    /// (setCollapseUnfreezeThreshold), as a new tree; null if none.
+    std::unique_ptr<BoolTreeT> collapsedVoxels(const BoolTreeT& freeze) const;
     /// Redistance only near the changes recorded since the last redistance.
     /// @return the number of Jacobi iterations.
     int incrementalRedistance(MultiLevelSetRedistance<MultiLevelSetT>& redist,
@@ -4562,6 +4585,8 @@ private:
     int mGrainSize = 1;
     float mTolerance;
     bool mFullRedistance = false;
+    double mCollapseFraction = 0.0; // setCollapseUnfreezeThreshold (0: off)
+    size_t mCollapsedUnfrozen = 0;
     bool mSplitting = true;
     /// largest interface motion per step (voxels)
     double mMaxMotion = lsmo_internal::kDefaultMaxInterfaceMotionVoxels;
@@ -5909,6 +5934,50 @@ LevelSetMultiObject<MultiLevelSetT, SpeedT, InterruptT>::applyDeferred(
 
 
 template<typename MultiLevelSetT, typename SpeedT, typename InterruptT>
+std::unique_ptr<typename LevelSetMultiObject<MultiLevelSetT, SpeedT, InterruptT>::BoolTreeT>
+LevelSetMultiObject<MultiLevelSetT, SpeedT, InterruptT>::collapsedVoxels(
+    const BoolTreeT& freeze) const
+{
+    const FloatTreeT& phi = mMls.phi()->tree();
+    const LabelTreeT& labels = mMls.labels()->tree();
+    const float limit = float(mCollapseFraction * mMls.voxelSize());
+    tree::LeafManager<const BoolTreeT> leafs(freeze);
+    std::vector<std::vector<Coord>> found(leafs.leafCount());
+    forEachIndex(leafs.leafCount(), [&](size_t i) {
+        tree::ValueAccessor<const FloatTreeT> phiAcc(phi);
+        tree::ValueAccessor<const LabelTreeT> lab(labels);
+        const Coord* offs = lsmo_internal::faceOffsets();
+        for (auto it = leafs.leaf(i).cbeginValueOn(); it; ++it) {
+            const Coord p = it.getCoord();
+            float phiP;
+            if (!phiAcc.probeValue(p, phiP)) continue; // inactive
+            const int32_t own = static_cast<int32_t>(lab.getValue(p));
+            if (this->isFixed(own)) continue;
+            bool other = false, keep = false;
+            for (int f = 0; f < 6 && !keep; ++f) {
+                const Coord q = p + offs[f];
+                const int32_t l = static_cast<int32_t>(lab.getValue(q));
+                if (this->isFixed(l)) { keep = true; break; } // exact distances
+                if (l == own) continue;
+                other = true;
+                float phiQ;
+                if (!phiAcc.probeValue(q, phiQ) || phiP + phiQ >= limit) keep = true;
+            }
+            if (other && !keep) found[i].push_back(p);
+        }
+    });
+    std::unique_ptr<BoolTreeT> out;
+    for (const auto& list : found) {
+        for (const Coord& p : list) {
+            if (!out) out.reset(new BoolTreeT(false));
+            out->setValueOn(p, true);
+        }
+    }
+    return out;
+}
+
+
+template<typename MultiLevelSetT, typename SpeedT, typename InterruptT>
 void
 LevelSetMultiObject<MultiLevelSetT, SpeedT, InterruptT>::bandMaintenance(const BoolTreeT& freeze)
 {
@@ -5987,20 +6056,33 @@ LevelSetMultiObject<MultiLevelSetT, SpeedT, InterruptT>::bandMaintenance(const B
     Scratch& sc = mScratch;
     sc.dirty.touch(phi);
     this->enforcePhiFloor();
+    // collapsed interfaces: leave those voxels to the redistance
+    std::unique_ptr<BoolTreeT> thawed;
+    if (mCollapseFraction > 0.0) {
+        if (auto collapsed = this->collapsedVoxels(freeze)) {
+            thawed.reset(new BoolTreeT(freeze));
+            for (auto it = collapsed->cbeginValueOn(); it; ++it) {
+                thawed->setValueOff(it.getCoord(), false);
+                sc.dirty.setOn(it.getCoord());
+                ++mCollapsedUnfrozen;
+            }
+        }
+    }
+    const BoolTreeT& seedSet = thawed ? *thawed : freeze;
     {
         MultiLevelSetRedistance<MultiLevelSetT> redist(mMls);
         redist.setTolerance(mTolerance);
         redist.setGrainSize(mGrainSize);
         if (mFullRedistance || !mPrimed) {
-            mRedistanceIterations = redist.redistance(freeze);
+            mRedistanceIterations = redist.redistance(seedSet);
         } else {
 #ifdef OPENVDB_ENABLE_ASSERTS
             this->checkChangesRecorded();
 #endif
-            mRedistanceIterations = this->incrementalRedistance(redist, freeze);
+            mRedistanceIterations = this->incrementalRedistance(redist, seedSet);
         }
         if (!redist.converged()) ++mRedistanceCapHits;
-        this->rememberSeeds(freeze);
+        this->rememberSeeds(seedSet);
         mPrimed = true;
     }
 #ifdef OPENVDB_ENABLE_ASSERTS

@@ -121,6 +121,9 @@ runCube(bool protect, Conn rule, int resolution, double tEnd)
     }
     lsmo.setConnectivity(rule);
     if (protect) lsmo.setTopologyPreservingLabels({1});
+    // MOGAC_COLLAPSE_UNFREEZE: unfreeze collapsed interface voxels (fraction
+    // of dx; 0 or unset: off), which stops the trailing edges leaving filaments
+    lsmo.setCollapseUnfreezeThreshold(envDouble("MOGAC_COLLAPSE_UNFREEZE", 0.0));
 
     // domain for the topology report: the cube's whole path, with margin
     const double margin = 8.0;

@@ -8,11 +8,11 @@ OpenVDB itself is not modified: it is a git submodule ([`external/openvdb`](exte
 
 ## Demo
 
-**Topology preservation with moving obstacles.** A cube is advected through three spheres that orbit as rigid kinematic labels, shown to t = 54. On the left, the cube is protected (26/6 digital topology): it wraps thin sheets around the spheres and stays a single solid with no tunnels or cavities. On the right, the same run without protection lets the spheres punch through; its topology changes from t = 46 on.
+**A cube pushed through moving obstacles.** A cube (translucent) is advected along +x through three spheres that orbit as rigid kinematic labels, shown to t = 54 at 128³. The cube has no topology constraint, so the spheres punch tunnels through it, and in its wake it breaks into several pieces; its 26/6 digital topology first changes at t = 8. The label partition keeps the cube and the spheres from overlapping or leaving vacuum between them throughout. (`TopologyCubeVideo`, run with `MOGAC_COLLAPSE_UNFREEZE=0.2`; the same scene with the cube topology-preserving is the `TopologyCubeThroughSpheres` test.)
 
-![MOGAC topology-preserving cube vs unconstrained](docs/media/mogac_topology_cube_t54.gif)
+![MOGAC cube advected through orbiting spheres](docs/media/mogac_cube_unconstrained.gif)
 
-([mp4](docs/media/mogac_topology_cube_t54.mp4))
+([mp4](docs/media/mogac_cube_unconstrained.mp4))
 
 **Eight objects in a twisting vortex.** Eight differently shaped objects (sphere, cube, platonic solids, capsule, torus) start on a ring and spiral in towards the axis in a divergence-free vortex field, stretching along it. A twist orthogonal to the stretching, whose rate grows with the distance from the mid-plane and turns opposite ways above and below it, bends the stretched objects into S-shapes. As the gaps between them close below a voxel they come into contact, and the label partition keeps them from overlapping or leaving vacuum between them (`VortexTwist`; the `VortexEightObjects` test runs the same scene without the twist).
 
@@ -223,11 +223,17 @@ Run it with `--help` for the remaining options (`--skip-build`, `--skip-tests`, 
 The scenes behind [`docs/media`](docs/media) are opt-in tests in [`tests/TestLevelSetMultiObjectVideo.cc`](tests/TestLevelSetMultiObjectVideo.cc), disabled so they don't slow down `ctest`:
 
 ```bash
-# topology cube: run both simulations, then compose them side by side
-OPENVDB_MOGAC_FRAME_DIR=/tmp/cube/frames ./build/tests/mogac_test \
+# cube through spheres: run the simulations (TopologyCubeVideo-1 is the
+# topology-preserving cube, -2 the unconstrained one), then render -2 with
+# Blender (Cycles) and encode it
+OPENVDB_MOGAC_FRAME_DIR=/tmp/cube/frames MOGAC_COLLAPSE_UNFREEZE=0.2 ./build/tests/mogac_test \
     --gtest_also_run_disabled_tests --gtest_filter='*DISABLED_TopologyCubeVideo'
-scripts/render_topology_cube.py /tmp/cube/frames docs/media/mogac_topology_cube_t54.mp4 \
-    --gif docs/media/mogac_topology_cube_t54.gif --subtitle "128^3" --frames 230
+blender -b --python scripts/render_topology_cube_blender.py -- \
+    /tmp/cube/frames/TopologyCubeVideo-2 /tmp/cube/png \
+    --bounds-from /tmp/cube/frames/TopologyCubeVideo-1 /tmp/cube/frames/TopologyCubeVideo-2 \
+    --title "unconstrained cube, 128^3" --frames 230
+cat /tmp/cube/png/frame_*.png | ffmpeg -f image2pipe -framerate 24 -i - \
+    -c:v libx264 -pix_fmt yuv420p -crf 18 docs/media/mogac_cube_unconstrained.mp4
 
 # twisting vortex: run, then render /tmp/vortex/frames/VortexTwist-1
 OPENVDB_MOGAC_FRAME_DIR=/tmp/vortex/frames ./build/tests/mogac_test \
@@ -235,7 +241,7 @@ OPENVDB_MOGAC_FRAME_DIR=/tmp/vortex/frames ./build/tests/mogac_test \
 scripts/render_mogac_tests.py --skip-build --skip-tests --out /tmp/vortex
 ```
 
-`MOGAC_VIDEO_RESOLUTION` sets the cube scene's voxels per cube side (default 128; the unit test uses 40) and `MOGAC_VIDEO_T_END` its end time (default 54). The scene starts from signed distance fields, so the spheres are sub-voxel accurate at any resolution. The 128³ run takes about 5 minutes on 16 cores.
+`MOGAC_VIDEO_RESOLUTION` sets the cube scene's voxels per cube side (default 128; the unit test uses 40) and `MOGAC_VIDEO_T_END` its end time (default 54). `MOGAC_COLLAPSE_UNFREEZE` sets `LevelSetMultiObject::setCollapseUnfreezeThreshold` (fraction of dx, default 0: off); without it, phi at the cube's trailing edges decays towards 0 on both sides of the interface over many steps, advection stalls there, and the edges leave one-voxel filaments behind the cube. The scene starts from signed distance fields, so the spheres are sub-voxel accurate at any resolution. The 128³ run takes about 5 minutes on 16 cores; the Blender render about 40 minutes per video on one RTX 3070 Ti (`--samples`, `--width`, `--height`, `--start`/`--end` to render part of it, `--device`).
 
 ## Documentation
 
